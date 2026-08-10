@@ -45,6 +45,7 @@ const (
 	AtomETH  ConfKey = "atom_eth"
 	AtomGRAM ConfKey = "atom_gram"
 
+	MonitorAuthToken    ConfKey = "monitor_auth_token" // 节点状态监控令牌，持久化不随会话失效
 	MonitorMinAmount    ConfKey = "monitor_min_amount" // 监控最小金额，低于此金额的入账不进行通知
 	PaymentMinAmount    ConfKey = "payment_min_amount"
 	PaymentMaxAmount    ConfKey = "payment_max_amount"

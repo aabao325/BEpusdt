@@ -63,6 +63,7 @@ func Handler() *gin.Engine {
 		epayInit(engine)
 		adminInit(engine)
 		authInit(engine)
+		monitorInit(engine)
 	}
 
 	return engine

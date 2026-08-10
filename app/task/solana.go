@@ -68,8 +68,10 @@ func (s *solana) syncSlotForward(ctx context.Context) {
 	req, _ := http.NewRequestWithContext(ctx, "POST", model.Endpoint(conf.Solana), bytes.NewBuffer([]byte(`{"jsonrpc":"2.0","id":1,"method":"getSlot"}`)))
 	req.Header.Set("Content-Type", "application/json")
 
+	// 取最新 slot 失败同样记入统计，否则端点彻底不可用时不会产生任何样本
 	resp, err := s.client.Do(req)
 	if err != nil {
+		conf.RecordFailure(conf.Solana)
 		log.Task.Warn("syncSlotForward Error sending request:", err)
 
 		return
@@ -78,6 +80,7 @@ func (s *solana) syncSlotForward(ctx context.Context) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
+		conf.RecordFailure(conf.Solana)
 		log.Task.Warn("syncSlotForward Error response status code:", resp.StatusCode)
 
 		return
@@ -85,6 +88,7 @@ func (s *solana) syncSlotForward(ctx context.Context) {
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		conf.RecordFailure(conf.Solana)
 		log.Task.Warn("syncSlotForward Error reading response body:", err)
 
 		return
@@ -92,6 +96,7 @@ func (s *solana) syncSlotForward(ctx context.Context) {
 
 	now := int(gjson.GetBytes(body, "result").Int())
 	if now <= 0 {
+		conf.RecordFailure(conf.Solana)
 		log.Task.Warn("syncSlotForward Error: invalid slot number:", now)
 
 		return

@@ -73,9 +73,11 @@ func (a *aptos) syncVersionForward(ctx context.Context) {
 		return
 	}
 
+	// 取最新 ledger_version 失败同样记入统计，否则端点彻底不可用时不会产生任何样本
 	req, _ := http.NewRequestWithContext(ctx, "GET", model.Endpoint(conf.Aptos)+"/v1", nil)
 	resp, err := a.client.Do(req)
 	if err != nil {
+		conf.RecordFailure(conf.Aptos)
 		log.Task.Warn("aptos syncVersionForward Error sending request:", err)
 
 		return
@@ -84,6 +86,7 @@ func (a *aptos) syncVersionForward(ctx context.Context) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
+		conf.RecordFailure(conf.Aptos)
 		log.Task.Warn("aptos syncVersionForward Error response status code:", resp.StatusCode)
 
 		return
@@ -91,6 +94,7 @@ func (a *aptos) syncVersionForward(ctx context.Context) {
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		conf.RecordFailure(conf.Aptos)
 		log.Task.Warn("aptos syncVersionForward Error reading response body:", err)
 
 		return
@@ -98,6 +102,7 @@ func (a *aptos) syncVersionForward(ctx context.Context) {
 
 	now := int(gjson.GetBytes(body, "ledger_version").Int())
 	if now <= 0 {
+		conf.RecordFailure(conf.Aptos)
 		log.Task.Warn("syncVersionForward Error: invalid ledger_version:", now)
 
 		return

@@ -71,8 +71,10 @@ func (t *tron) syncBlocksForward(context.Context) {
 		return
 	}
 
+	// 取链上最新高度失败同样记入统计，否则端点彻底不可用时不会产生任何样本
 	conn, err := t.client()
 	if err != nil {
+		conf.RecordFailure(conf.Tron)
 		log.Task.Error("grpc.NewClient", err)
 
 		return
@@ -83,6 +85,7 @@ func (t *tron) syncBlocksForward(context.Context) {
 	defer cancel()
 
 	if err1 != nil {
+		conf.RecordFailure(conf.Tron)
 		log.Task.Warn("GetNowBlock2 超时：", err1)
 
 		return

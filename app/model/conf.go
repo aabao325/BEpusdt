@@ -252,9 +252,51 @@ func FillDefaultConf() {
 			rows = append(rows, Conf{K: k, V: v})
 		}
 	}
+
+	// 监控令牌需随机生成，无法作为静态默认值，这里惰性补齐（含老版本升级场景）
+	if _, ok := existSet[MonitorAuthToken]; !ok {
+		rows = append(rows, Conf{K: MonitorAuthToken, V: newMonitorToken()})
+	}
+
 	if len(rows) > 0 {
 		Db.Create(&rows)
 	}
+}
+
+func newMonitorToken() string {
+	rand, err := utils.GenerateTradeId()
+	if err != nil {
+		rand = utils.Md5String(time.Now().String())
+	}
+
+	return strings.ToUpper(utils.Md5String(utils.StrSha256(rand)))
+}
+
+// MonitorToken 节点监控令牌，持久存储于数据库，不随后台会话失效
+func MonitorToken() string {
+	if token := GetC(MonitorAuthToken); token != "" {
+
+		return token
+	}
+
+	// 缓存未命中时回落数据库，避免尚未 RefreshC 的时序问题
+	if token := GetK(MonitorAuthToken); token != "" {
+
+		return token
+	}
+
+	var token = newMonitorToken()
+	SetK(MonitorAuthToken, token)
+
+	return token
+}
+
+// ResetMonitorToken 重置节点监控令牌
+func ResetMonitorToken() string {
+	var token = newMonitorToken()
+	SetK(MonitorAuthToken, token)
+
+	return token
 }
 
 func GetLookbackHour() time.Duration {

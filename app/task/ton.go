@@ -60,9 +60,11 @@ func (t *ton) syncMBSeqnoForward(ctx context.Context) {
 		}
 
 		// 初始化：首次获取当前最新高度作为起点
+		// 取高度失败同样记入统计，否则端点彻底不可用时不会产生任何样本
 		if t.lastBlockSeqno == 0 {
 			mb, err := t.client().CurrentMasterchainInfo(ctx)
 			if err != nil {
+				conf.RecordFailure(conf.Ton)
 				log.Task.Warn(fmt.Sprintf("get current masterchain info: %v", err))
 				time.Sleep(time.Second)
 				continue
@@ -80,6 +82,7 @@ func (t *ton) syncMBSeqnoForward(ctx context.Context) {
 				return
 			}
 
+			conf.RecordFailure(conf.Ton)
 			log.Task.Warn(fmt.Sprintf("WaitForBlock GetMasterchainInfo err: %v", err))
 			time.Sleep(time.Second)
 			continue

@@ -62,9 +62,12 @@ func (e *evm) syncBlocksForward(ctx context.Context) {
 		return
 	}
 
+	// 此处为取链上最新高度。端点不可用（鉴权失败、限流、网络不通）时会在此处早退，
+	// 若不记录失败，统计表将不产生任何样本，节点彻底故障反而表现为「无数据」而非低成功率。
 	post := []byte(`{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}`)
 	req, err := http.NewRequestWithContext(ctx, "POST", e.rpcEndpoint(), bytes.NewBuffer(post))
 	if err != nil {
+		conf.RecordFailure(e.Network)
 		log.Task.Warn("Error creating request:", err)
 
 		return
@@ -73,6 +76,7 @@ func (e *evm) syncBlocksForward(ctx context.Context) {
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := e.Client.Do(req)
 	if err != nil {
+		conf.RecordFailure(e.Network)
 		log.Task.Warn("Error sending request:", err)
 
 		return
@@ -82,6 +86,7 @@ func (e *evm) syncBlocksForward(ctx context.Context) {
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		conf.RecordFailure(e.Network)
 		log.Task.Warn("Error reading response body:", err)
 
 		return
@@ -89,6 +94,7 @@ func (e *evm) syncBlocksForward(ctx context.Context) {
 
 	var res = gjson.ParseBytes(body)
 	if !res.IsObject() {
+		conf.RecordFailure(e.Network)
 		log.Task.Warn(fmt.Sprintf("EVM 数据解析错误(%s): %s", e.Network, string(body)))
 
 		return
@@ -446,6 +452,14 @@ func (e *evm) tradeConfirmHandle(ctx context.Context) {
 func (e *evm) rpcEndpoint() string {
 
 	return model.Endpoint(model.Network(e.Network))
+}
+
+// ScanActive 判断指定网络的扫块器当前是否应处于活跃状态。
+// 扫块为需求驱动，空闲时会主动停扫，此时统计数据不再刷新属正常现象；
+// 监控接口据此区分「节点故障」与「网关空闲」。传 0 以跳过队列堆积判断。
+func ScanActive(network string) bool {
+
+	return !syncBreak(network, 0)
 }
 
 func syncBreak(network string, num int) bool {
