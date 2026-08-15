@@ -116,8 +116,19 @@ func GetStats() map[string]info {
 	return m
 }
 
-// GetMetrics 返回全部已产生扫块记录的网络指标，按网络名排序保证输出稳定
-func GetMetrics() []Metric {
+// GetMetrics 返回全部已产生扫块记录的网络指标，按网络名排序保证输出稳定。
+//
+// recentWindow 指定「近期窗口」取多少个最新样本，用于计算 RecentRate。
+// 使用方应让它与自身的轮询间隔相匹配：窗口覆盖的时间短于轮询间隔时，
+// 两次轮询之间的故障若已自愈就会被漏掉。传 0 或负数则用默认值。
+func GetMetrics(recentWindow int) []Metric {
+	if recentWindow <= 0 {
+		recentWindow = recentRecords
+	}
+	if recentWindow > maxRecords {
+		recentWindow = maxRecords
+	}
+
 	var list = make([]Metric, 0)
 
 	data.Range(func(k, v interface{}) bool {
@@ -127,7 +138,7 @@ func GetMetrics() []Metric {
 		s.mu.RLock()
 		total, succ := s.total, s.succ
 		rate := s.ratef()
-		recentRate, recentTotal := s.recentRatef()
+		recentRate, recentTotal := s.recentRatef(recentWindow)
 		s.mu.RUnlock()
 
 		var m = Metric{
@@ -185,9 +196,9 @@ func (s *stat) ratef() float64 {
 	return float64(s.succ) / float64(s.total) * 100
 }
 
-// recentRatef 近期窗口成功率，从环形缓冲区末尾往回取样；调用方必须持有锁
-func (s *stat) recentRatef() (float64, int) {
-	var n = recentRecords
+// recentRatef 近期窗口成功率，从环形缓冲区末尾往回取样 window 个；调用方必须持有锁
+func (s *stat) recentRatef(window int) (float64, int) {
+	var n = window
 	if s.total < n {
 		n = s.total
 	}

@@ -25,7 +25,7 @@ func TestRecentRateReflectsLatestSamples(t *testing.T) {
 
 	s := getStat(net)
 	s.mu.RLock()
-	recent, n := s.recentRatef()
+	recent, n := s.recentRatef(recentRecords)
 	total := s.ratef()
 	s.mu.RUnlock()
 
@@ -57,7 +57,7 @@ func TestRecentRateAfterWraparound(t *testing.T) {
 
 	s := getStat(net)
 	s.mu.RLock()
-	recent, n := s.recentRatef()
+	recent, n := s.recentRatef(recentRecords)
 	s.mu.RUnlock()
 
 	if n != recentRecords {
@@ -106,7 +106,7 @@ func TestMetricsStaleAndNeverSucceeded(t *testing.T) {
 	RecordFailure(net)
 
 	var found bool
-	for _, m := range GetMetrics() {
+	for _, m := range GetMetrics(recentRecords) {
 		if m.Network != net {
 			continue
 		}
@@ -131,6 +131,64 @@ func TestMetricsStaleAndNeverSucceeded(t *testing.T) {
 	}
 }
 
+// 自定义窗口必须真的改变取样范围：同一批样本，窗口越大越能看到更早的失败
+func TestCustomRecentWindow(t *testing.T) {
+	const net = "test-window"
+	reset(net)
+
+	// 100 次失败，然后 20 次成功
+	for i := 0; i < 100; i++ {
+		RecordFailure(net)
+	}
+	for i := 0; i < 20; i++ {
+		RecordSuccess(net, "1")
+	}
+
+	cases := []struct {
+		window int
+		want   float64
+	}{
+		{20, 100}, // 最近 20 条全是成功，看不到失败
+		{40, 50},  // 20 成功 + 20 失败
+		{100, 20}, // 20 成功 + 80 失败
+		{120, 100.0 / 6},
+	}
+
+	for _, c := range cases {
+		var got float64
+		for _, m := range GetMetrics(c.window) {
+			if m.Network == net {
+				got = m.RecentRate
+			}
+		}
+		if diff := got - c.want; diff > 0.01 || diff < -0.01 {
+			t.Fatalf("window=%d 成功率 = %.2f, 期望 %.2f", c.window, got, c.want)
+		}
+		t.Logf("window=%3d → %.2f%%", c.window, got)
+	}
+}
+
+func TestGetMetricsWindowClamped(t *testing.T) {
+	const net = "test-clamp"
+	reset(net)
+	RecordSuccess(net, "1")
+
+	for _, w := range []int{0, -1, maxRecords + 999} {
+		var found bool
+		for _, m := range GetMetrics(w) {
+			if m.Network == net {
+				found = true
+				if m.RecentTotal < 1 {
+					t.Fatalf("window=%d 未取到样本", w)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("window=%d 未返回该网络", w)
+		}
+	}
+}
+
 func TestMetricsSortedStable(t *testing.T) {
 	for _, n := range []string{"zeta", "alpha", "mid"} {
 		reset(n)
@@ -145,7 +203,7 @@ func TestMetricsSortedStable(t *testing.T) {
 	var first string
 	for i := 0; i < 5; i++ {
 		var order string
-		for _, m := range GetMetrics() {
+		for _, m := range GetMetrics(recentRecords) {
 			order += m.Network + ","
 		}
 		if i == 0 {

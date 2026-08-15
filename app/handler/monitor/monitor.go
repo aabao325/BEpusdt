@@ -10,10 +10,10 @@ import (
 	"crypto/subtle"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/spf13/cast"
 	"github.com/v03413/bepusdt/app/conf"
 	"github.com/v03413/bepusdt/app/model"
 	"github.com/v03413/bepusdt/app/task"
@@ -29,12 +29,15 @@ const (
 
 	defaultRateThreshold  = 50.0 // 成功率告警阈值，百分比
 	defaultStaleThreshold = 300  // 同步陈旧告警阈值，秒
+	defaultSamples        = 20   // 近期窗口默认样本数
+	maxSamples            = 1000 // 近期窗口上限，与 conf 层环形缓冲区容量一致
 )
 
 type metric struct {
 	conf.Metric
-	Alert  bool     `json:"alert"`
-	Reason []string `json:"reason,omitempty"`
+	RateUsed float64  `json:"rate_used"` // 实际参与阈值比较的成功率，取决于 window 参数
+	Alert    bool     `json:"alert"`
+	Reason   []string `json:"reason,omitempty"`
 }
 
 // Stats GET /api/monitor/stats
@@ -52,34 +55,25 @@ func (Monitor) Stats(ctx *gin.Context) {
 		return
 	}
 
-	var rateThreshold = defaultRateThreshold
-	if v := ctx.Query("threshold"); v != "" {
-		rateThreshold = cast.ToFloat64(v)
-	}
-
-	var staleThreshold = int64(defaultStaleThreshold)
-	if v := ctx.Query("stale"); v != "" {
-		staleThreshold = cast.ToInt64(v)
-	}
-
-	var useTotal = ctx.Query("window") == "total"
+	var p = parseParams(ctx.Query)
+	var rateThreshold, staleThreshold, useTotal = p.RateThreshold, p.StaleThreshold, p.UseTotal
 
 	var items = make([]metric, 0)
 	var alerts = make([]string, 0)
 	var scanning int
 
-	for _, itm := range conf.GetMetrics() {
+	for _, itm := range conf.GetMetrics(p.Samples) {
 		itm.Scanning = task.ScanActive(itm.Network)
 		if itm.Scanning {
 			scanning++
 		}
 
-		var m = metric{Metric: itm, Reason: make([]string, 0)}
-
 		var rate = itm.RecentRate
 		if useTotal {
 			rate = itm.SuccessRate
 		}
+
+		var m = metric{Metric: itm, RateUsed: rate, Reason: make([]string, 0)}
 
 		// 样本为空时成功率恒为 100，不具备判断意义，跳过以免掩盖问题或误报
 		if itm.Total > 0 && rate < rateThreshold {
@@ -111,22 +105,99 @@ func (Monitor) Stats(ctx *gin.Context) {
 		status = statusNoData
 	}
 
+	var summary = gin.H{
+		"networks":         len(items),
+		"scanning":         scanning,
+		"alerting":         len(alerts),
+		"rate_threshold":   rateThreshold,
+		"stale_threshold":  staleThreshold,
+		"window":           map[bool]string{true: "total", false: "recent"}[useTotal],
+		"recent_samples":   p.Samples,
+		"scan_demand_note": "扫块为需求驱动，无待处理订单且未启用钱包监控时会停扫，此时 scanning 为 false，陈旧维度不参与告警",
+	}
+
+	// 参数写错时显式回报，避免使用方以为阈值已生效
+	if len(p.Errors) > 0 {
+		summary["param_errors"] = p.Errors
+	}
+
 	ctx.JSON(http.StatusOK, gin.H{
-		"code":   200,
-		"status": status,
-		"alert":  len(alerts) > 0,
-		"alerts": alerts,
-		"summary": gin.H{
-			"networks":         len(items),
-			"scanning":         scanning,
-			"alerting":         len(alerts),
-			"rate_threshold":   rateThreshold,
-			"stale_threshold":  staleThreshold,
-			"window":           map[bool]string{true: "total", false: "recent"}[useTotal],
-			"scan_demand_note": "扫块为需求驱动，无待处理订单且未启用钱包监控时会停扫，此时 scanning 为 false，陈旧维度不参与告警",
-		},
+		"code":     200,
+		"status":   status,
+		"alert":    len(alerts) > 0,
+		"alerts":   alerts,
+		"summary":  summary,
 		"networks": items,
 	})
+}
+
+type params struct {
+	RateThreshold  float64
+	StaleThreshold int64
+	UseTotal       bool
+	Samples        int
+	Errors         []string
+}
+
+// parseParams 解析查询参数。非法值不静默回落默认值，而是记入 Errors 一并返回，
+// 否则使用方（如把 URL 里 & 误写成 &amp;）会看到「阈值明明设了 90 却按 50 告警」
+// 这种无从排查的现象。
+func parseParams(query func(string) string) params {
+	var p = params{
+		RateThreshold:  defaultRateThreshold,
+		StaleThreshold: defaultStaleThreshold,
+		Samples:        defaultSamples,
+		Errors:         make([]string, 0),
+	}
+
+	if v := strings.TrimSpace(query("threshold")); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		switch {
+		case err != nil:
+			p.Errors = append(p.Errors, fmt.Sprintf("threshold=%q 无法解析为数值，已按默认 %.0f 处理", v, defaultRateThreshold))
+		case f < 0 || f > 100:
+			p.Errors = append(p.Errors, fmt.Sprintf("threshold=%v 超出 0~100 范围，已按默认 %.0f 处理", f, defaultRateThreshold))
+		default:
+			p.RateThreshold = f
+		}
+	}
+
+	if v := strings.TrimSpace(query("stale")); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		switch {
+		case err != nil:
+			p.Errors = append(p.Errors, fmt.Sprintf("stale=%q 无法解析为整数，已按默认 %d 处理", v, defaultStaleThreshold))
+		case n < 0:
+			p.Errors = append(p.Errors, fmt.Sprintf("stale=%d 不能为负，已按默认 %d 处理", n, defaultStaleThreshold))
+		default:
+			p.StaleThreshold = n
+		}
+	}
+
+	if v := strings.TrimSpace(query("samples")); v != "" {
+		n, err := strconv.Atoi(v)
+		switch {
+		case err != nil:
+			p.Errors = append(p.Errors, fmt.Sprintf("samples=%q 无法解析为整数，已按默认 %d 处理", v, defaultSamples))
+		case n < 1 || n > maxSamples:
+			p.Errors = append(p.Errors, fmt.Sprintf("samples=%d 超出 1~%d 范围，已按默认 %d 处理", n, maxSamples, defaultSamples))
+		default:
+			p.Samples = n
+		}
+	}
+
+	if v := strings.TrimSpace(query("window")); v != "" {
+		switch v {
+		case "total":
+			p.UseTotal = true
+		case "recent":
+			p.UseTotal = false
+		default:
+			p.Errors = append(p.Errors, fmt.Sprintf("window=%q 无效，仅支持 recent 或 total，已按 recent 处理", v))
+		}
+	}
+
+	return p
 }
 
 func authorize(ctx *gin.Context) bool {
