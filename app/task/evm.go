@@ -129,8 +129,9 @@ func (e *evm) syncBlocksForward(ctx context.Context) {
 	// 成功获取最新高度，记录成功样本
 	conf.RecordSuccess(e.Network, cast.ToString(now))
 
-	// 采样日志：每 20 次成功或距上次日志超 5 分钟，记录一次
-	shouldLog := false
+	// 采样日志：暂时每次都记录，便于实时观测（24 小时后可改回每 20 次采样）
+	shouldLog := true
+	/*
 	if v, ok := scanLogState.Load(e.Network); ok {
 		state := v.(scanLog)
 		state.count++
@@ -144,6 +145,7 @@ func (e *evm) syncBlocksForward(ctx context.Context) {
 		shouldLog = true
 		scanLogState.Store(e.Network, scanLog{lastLog: time.Now(), count: 0})
 	}
+	*/
 
 	if shouldLog {
 		log.Task.Infof("[%s] 扫块成功: height=%d, rpc=%s, elapsed=%v",

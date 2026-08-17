@@ -112,21 +112,9 @@ func (s *solana) syncSlotForward(ctx context.Context) {
 	// 成功获取最新 slot
 	conf.RecordSuccess(conf.Solana, cast.ToString(now))
 
-	// 采样日志
-	solanaLogMu.Lock()
-	solanaScanLog.count++
-	shouldLog := false
-	if solanaScanLog.count >= 20 || time.Since(solanaScanLog.lastLog) > 5*time.Minute {
-		shouldLog = true
-		solanaScanLog.lastLog = time.Now()
-		solanaScanLog.count = 0
-	}
-	solanaLogMu.Unlock()
-
-	if shouldLog {
-		log.Task.Infof("[SOLANA] 扫块成功: slot=%d, rpc=%s, elapsed=%v",
-			now, model.Endpoint(conf.Solana), elapsed)
-	}
+	// 暂时每次都记录，便于实时观测
+	log.Task.Infof("[SOLANA] 扫块成功: slot=%d, rpc=%s, elapsed=%v",
+		now, model.Endpoint(conf.Solana), elapsed)
 
 	if elapsed > 3*time.Second {
 		log.Task.Warnf("[SOLANA] 扫块慢请求: slot=%d, rpc=%s, elapsed=%v (接近 5s 超时)",

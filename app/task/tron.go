@@ -101,21 +101,9 @@ func (t *tron) syncBlocksForward(context.Context) {
 	// 成功获取最新高度，记录成功样本
 	conf.RecordSuccess(conf.Tron, cast.ToString(now))
 
-	// 采样日志
-	tronLogMu.Lock()
-	tronScanLog.count++
-	shouldLog := false
-	if tronScanLog.count >= 20 || time.Since(tronScanLog.lastLog) > 5*time.Minute {
-		shouldLog = true
-		tronScanLog.lastLog = time.Now()
-		tronScanLog.count = 0
-	}
-	tronLogMu.Unlock()
-
-	if shouldLog {
-		log.Task.Infof("[TRON] 扫块成功: height=%d, rpc=%v, elapsed=%v",
-			now, model.GetC(model.RpcEndpointTron), elapsed)
-	}
+	// 暂时每次都记录，便于实时观测
+	log.Task.Infof("[TRON] 扫块成功: height=%d, rpc=%v, elapsed=%v",
+		now, model.GetC(model.RpcEndpointTron), elapsed)
 
 	if elapsed > 8*time.Second {
 		log.Task.Warnf("[TRON] 扫块慢请求: height=%d, rpc=%v, elapsed=%v (接近 15s 超时)",

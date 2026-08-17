@@ -27,16 +27,19 @@ func newLogger(file string) (*logrus.Logger, error) {
 	})
 
 	logger.SetLevel(logrus.InfoLevel)
-	output := &lumberjack.Logger{
+
+	// 文件轮转：单文件 50MB（降低），保留 2 个备份（约 24 小时），1 天过期
+	fileWriter := &lumberjack.Logger{
 		Filename:   file,
-		MaxSize:    300,
-		MaxBackups: 5,
-		MaxAge:     7,
+		MaxSize:    50,  // MB，从 300 降到 50
+		MaxBackups: 2,   // 从 5 降到 2，约覆盖 24 小时
+		MaxAge:     1,   // 从 7 天降到 1 天
 		Compress:   true,
 	}
 
-	logger.SetOutput(output)
-	loggers = append(loggers, output)
+	// 同时输出到文件和 stdout（docker logs 能看到）
+	logger.SetOutput(io.MultiWriter(os.Stdout, fileWriter))
+	loggers = append(loggers, fileWriter)
 
 	return logger, nil
 }
