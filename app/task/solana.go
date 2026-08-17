@@ -42,6 +42,10 @@ type solanaTokenOwner struct {
 
 var sol solana
 
+// Solana 扫块日志采样
+var solanaScanLog = scanLog{}
+var solanaLogMu sync.Mutex
+
 func init() {
 	sol = newSolana()
 	Register(Task{Callback: sol.slotDispatch})
@@ -60,8 +64,9 @@ func newSolana() solana {
 }
 
 func (s *solana) syncSlotForward(ctx context.Context) {
-	if syncBreak(conf.Solana, s.slotQueue.Len()) {
+	start := time.Now()
 
+	if syncBreak(conf.Solana, s.slotQueue.Len()) {
 		return
 	}
 
@@ -70,10 +75,12 @@ func (s *solana) syncSlotForward(ctx context.Context) {
 
 	// 取最新 slot 失败同样记入统计，否则端点彻底不可用时不会产生任何样本
 	resp, err := s.client.Do(req)
+	elapsed := time.Since(start)
+
 	if err != nil {
 		conf.RecordFailure(conf.Solana)
-		log.Task.Warn("syncSlotForward Error sending request:", err)
-
+		log.Task.Warnf("[SOLANA] 扫块失败: RPC 请求错误, rpc=%s, elapsed=%v, err=%v",
+			model.Endpoint(conf.Solana), elapsed, err)
 		return
 	}
 
@@ -81,25 +88,49 @@ func (s *solana) syncSlotForward(ctx context.Context) {
 
 	if resp.StatusCode != 200 {
 		conf.RecordFailure(conf.Solana)
-		log.Task.Warn("syncSlotForward Error response status code:", resp.StatusCode)
-
+		log.Task.Warnf("[SOLANA] 扫块失败: HTTP %d, rpc=%s, elapsed=%v",
+			resp.StatusCode, model.Endpoint(conf.Solana), elapsed)
 		return
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		conf.RecordFailure(conf.Solana)
-		log.Task.Warn("syncSlotForward Error reading response body:", err)
-
+		log.Task.Warnf("[SOLANA] 扫块失败: 读取响应失败, rpc=%s, elapsed=%v, err=%v",
+			model.Endpoint(conf.Solana), elapsed, err)
 		return
 	}
 
 	now := int(gjson.GetBytes(body, "result").Int())
 	if now <= 0 {
 		conf.RecordFailure(conf.Solana)
-		log.Task.Warn("syncSlotForward Error: invalid slot number:", now)
-
+		log.Task.Warnf("[SOLANA] 扫块失败: 无效 slot=%d, rpc=%s, elapsed=%v, body=%s",
+			now, model.Endpoint(conf.Solana), elapsed, string(body))
 		return
+	}
+
+	// 成功获取最新 slot
+	conf.RecordSuccess(conf.Solana, cast.ToString(now))
+
+	// 采样日志
+	solanaLogMu.Lock()
+	solanaScanLog.count++
+	shouldLog := false
+	if solanaScanLog.count >= 20 || time.Since(solanaScanLog.lastLog) > 5*time.Minute {
+		shouldLog = true
+		solanaScanLog.lastLog = time.Now()
+		solanaScanLog.count = 0
+	}
+	solanaLogMu.Unlock()
+
+	if shouldLog {
+		log.Task.Infof("[SOLANA] 扫块成功: slot=%d, rpc=%s, elapsed=%v",
+			now, model.Endpoint(conf.Solana), elapsed)
+	}
+
+	if elapsed > 3*time.Second {
+		log.Task.Warnf("[SOLANA] 扫块慢请求: slot=%d, rpc=%s, elapsed=%v (接近 5s 超时)",
+			now, model.Endpoint(conf.Solana), elapsed)
 	}
 
 	if now-s.lastSlotNum > cast.ToInt(model.GetC(model.BlockHeightMaxDiff)) { // 区块高度变化过大，强制丢块重扫
@@ -107,13 +138,11 @@ func (s *solana) syncSlotForward(ctx context.Context) {
 	}
 
 	if now == s.lastSlotNum { // 区块高度没有变化
-
 		return
 	}
 
 	for n := s.lastSlotNum + 1; n <= now; n++ {
 		// 待扫描区块入列
-
 		s.slotQueue.In <- n
 	}
 

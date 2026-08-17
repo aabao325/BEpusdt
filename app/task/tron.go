@@ -45,6 +45,10 @@ type tron struct {
 
 var tr tron
 
+// Tron 扫块日志采样
+var tronScanLog = scanLog{}
+var tronLogMu sync.Mutex
+
 func init() {
 	tr = newTron()
 	Register(Task{Duration: time.Second, Callback: tr.blockDispatch})
@@ -66,8 +70,9 @@ func newTron() tron {
 
 // syncBlocksForward 正向同步区块
 func (t *tron) syncBlocksForward(context.Context) {
-	if t.syncBreak() {
+	start := time.Now()
 
+	if t.syncBreak() {
 		return
 	}
 
@@ -75,23 +80,47 @@ func (t *tron) syncBlocksForward(context.Context) {
 	conn, err := t.client()
 	if err != nil {
 		conf.RecordFailure(conf.Tron)
-		log.Task.Error("grpc.NewClient", err)
-
+		log.Task.Warnf("[TRON] 扫块失败: gRPC 连接错误, rpc=%v, err=%v", model.GetC(model.RpcEndpointTron), err)
 		return
 	}
 
 	var ctx, cancel = context.WithTimeout(context.Background(), time.Second*15)
 	block, err1 := api.NewWalletClient(conn).GetNowBlock2(ctx, nil)
+	elapsed := time.Since(start)
 	defer cancel()
 
 	if err1 != nil {
 		conf.RecordFailure(conf.Tron)
-		log.Task.Warn("GetNowBlock2 超时：", err1)
-
+		log.Task.Warnf("[TRON] 扫块失败: GetNowBlock2 超时, rpc=%v, elapsed=%v, err=%v",
+			model.GetC(model.RpcEndpointTron), elapsed, err1)
 		return
 	}
 
 	var now = int(block.BlockHeader.RawData.Number)
+
+	// 成功获取最新高度，记录成功样本
+	conf.RecordSuccess(conf.Tron, cast.ToString(now))
+
+	// 采样日志
+	tronLogMu.Lock()
+	tronScanLog.count++
+	shouldLog := false
+	if tronScanLog.count >= 20 || time.Since(tronScanLog.lastLog) > 5*time.Minute {
+		shouldLog = true
+		tronScanLog.lastLog = time.Now()
+		tronScanLog.count = 0
+	}
+	tronLogMu.Unlock()
+
+	if shouldLog {
+		log.Task.Infof("[TRON] 扫块成功: height=%d, rpc=%v, elapsed=%v",
+			now, model.GetC(model.RpcEndpointTron), elapsed)
+	}
+
+	if elapsed > 8*time.Second {
+		log.Task.Warnf("[TRON] 扫块慢请求: height=%d, rpc=%v, elapsed=%v (接近 15s 超时)",
+			now, model.GetC(model.RpcEndpointTron), elapsed)
+	}
 
 	// 区块高度变化过大，强制丢块重扫
 	if now-t.lastBlockNum > cast.ToInt(model.GetC(model.BlockHeightMaxDiff)) {
@@ -100,7 +129,6 @@ func (t *tron) syncBlocksForward(context.Context) {
 
 	// 区块高度没有变化
 	if now == t.lastBlockNum {
-
 		return
 	}
 

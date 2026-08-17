@@ -31,6 +31,14 @@ const (
 
 var chainBlockNum sync.Map
 
+// 扫块日志采样：避免成功日志刷屏，每个网络记录 (lastLogTime, successCount)
+var scanLogState sync.Map
+
+type scanLog struct {
+	lastLog time.Time
+	count   int64
+}
+
 type block struct {
 	RollDelayOffset int64 // 延迟偏移量，某些RPC节点如果不延迟，会报错 block is out of range，目前发现 https://rpc.xlayer.tech/ 存在此问题
 	ConfirmedOffset int   // 确认偏移量，开启交易确认后，区块高度需要减去此值认为交易已确认
@@ -57,8 +65,9 @@ type evmBlock struct {
 }
 
 func (e *evm) syncBlocksForward(ctx context.Context) {
-	if syncBreak(e.Network, e.blockScanQueue.Len()) {
+	start := time.Now()
 
+	if syncBreak(e.Network, e.blockScanQueue.Len()) {
 		return
 	}
 
@@ -68,17 +77,18 @@ func (e *evm) syncBlocksForward(ctx context.Context) {
 	req, err := http.NewRequestWithContext(ctx, "POST", e.rpcEndpoint(), bytes.NewBuffer(post))
 	if err != nil {
 		conf.RecordFailure(e.Network)
-		log.Task.Warn("Error creating request:", err)
-
+		log.Task.Warnf("[%s] 扫块失败: 创建请求错误, rpc=%s, err=%v", e.Network, e.rpcEndpoint(), err)
 		return
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := e.Client.Do(req)
+	elapsed := time.Since(start)
+
 	if err != nil {
 		conf.RecordFailure(e.Network)
-		log.Task.Warn("Error sending request:", err)
-
+		log.Task.Warnf("[%s] 扫块失败: RPC 请求错误, rpc=%s, elapsed=%v, err=%v",
+			e.Network, e.rpcEndpoint(), elapsed, err)
 		return
 	}
 
@@ -87,22 +97,21 @@ func (e *evm) syncBlocksForward(ctx context.Context) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		conf.RecordFailure(e.Network)
-		log.Task.Warn("Error reading response body:", err)
-
+		log.Task.Warnf("[%s] 扫块失败: 读取响应失败, rpc=%s, elapsed=%v, err=%v",
+			e.Network, e.rpcEndpoint(), elapsed, err)
 		return
 	}
 
 	var res = gjson.ParseBytes(body)
 	if !res.IsObject() {
 		conf.RecordFailure(e.Network)
-		log.Task.Warn(fmt.Sprintf("EVM 数据解析错误(%s): %s", e.Network, string(body)))
-
+		log.Task.Warnf("[%s] 扫块失败: 响应解析错误, rpc=%s, elapsed=%v, body=%s",
+			e.Network, e.rpcEndpoint(), elapsed, string(body))
 		return
 	}
 
 	var now = utils.HexStr2Int(res.Get("result").String()).Int64() - e.Block.RollDelayOffset
 	if now <= 0 {
-
 		return
 	}
 
@@ -112,13 +121,42 @@ func (e *evm) syncBlocksForward(ctx context.Context) {
 	}
 
 	if now-lastBlockNumber > cast.ToInt64(model.GetC(model.BlockHeightMaxDiff)) {
-
 		lastBlockNumber = now - 1
 	}
 
 	chainBlockNum.Store(e.Network, now)
-	if now <= lastBlockNumber {
 
+	// 成功获取最新高度，记录成功样本
+	conf.RecordSuccess(e.Network, cast.ToString(now))
+
+	// 采样日志：每 20 次成功或距上次日志超 5 分钟，记录一次
+	shouldLog := false
+	if v, ok := scanLogState.Load(e.Network); ok {
+		state := v.(scanLog)
+		state.count++
+		if state.count >= 20 || time.Since(state.lastLog) > 5*time.Minute {
+			shouldLog = true
+			state.lastLog = time.Now()
+			state.count = 0
+		}
+		scanLogState.Store(e.Network, state)
+	} else {
+		shouldLog = true
+		scanLogState.Store(e.Network, scanLog{lastLog: time.Now(), count: 0})
+	}
+
+	if shouldLog {
+		log.Task.Infof("[%s] 扫块成功: height=%d, rpc=%s, elapsed=%v",
+			e.Network, now, e.rpcEndpoint(), elapsed)
+	}
+
+	// 慢请求告警（接近超时）
+	if elapsed > 3*time.Second {
+		log.Task.Warnf("[%s] 扫块慢请求: height=%d, rpc=%s, elapsed=%v (接近 5s 超时)",
+			e.Network, now, e.rpcEndpoint(), elapsed)
+	}
+
+	if now <= lastBlockNumber {
 		return
 	}
 
