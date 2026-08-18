@@ -3,6 +3,8 @@ package monitor
 import (
 	"net/url"
 	"testing"
+
+	"github.com/v03413/bepusdt/app/conf"
 )
 
 // queryOf 用真实的 URL 解析构造 query 取值函数，避免手写 map 掩盖编码问题
@@ -164,4 +166,108 @@ func TestSamplesCoversPollInterval(t *testing.T) {
 		defaultSamples, defaultSamples*fastestScanSeconds, pollSeconds-defaultSamples*fastestScanSeconds)
 	t.Logf("samples=%d 覆盖 %d 秒 → 恰好无盲区，且需 %d 次失败才告警（约 %d 秒）",
 		recommended, recommended*fastestScanSeconds, needed(recommended, 90), needed(recommended, 90)*fastestScanSeconds)
+}
+
+// 空闲停扫的网络绝不告警：这是本次修复的核心。
+// 扫块需求驱动，无订单时统计值冻结，此时任何告警都不可行动。
+func TestEvaluateSkipsIdleNetwork(t *testing.T) {
+	// 一条既低成功率、又长期未同步的网络，但已停扫
+	idle := conf.Metric{
+		Network:      "bsc",
+		Scanning:     false,
+		Total:        100,
+		RecentRate:   20,
+		SuccessRate:  20,
+		StaleSeconds: 513813,
+	}
+
+	m := evaluate(idle, false, 90, 300)
+	if m.Alert {
+		t.Fatalf("空闲网络不应告警, reason=%v", m.Reason)
+	}
+	if len(m.Reason) != 0 {
+		t.Fatalf("空闲网络不应有告警原因, got %v", m.Reason)
+	}
+}
+
+// 同样的数据，只要在扫链就必须告警
+func TestEvaluateAlertsWhenScanning(t *testing.T) {
+	active := conf.Metric{
+		Network:      "bsc",
+		Scanning:     true,
+		Total:        100,
+		RecentRate:   20,
+		SuccessRate:  20,
+		StaleSeconds: 10,
+	}
+
+	m := evaluate(active, false, 90, 300)
+	if !m.Alert {
+		t.Fatal("扫链中且成功率 20% < 90% 应告警")
+	}
+	if m.RateUsed != 20 {
+		t.Fatalf("rate_used = %v, 期望 20", m.RateUsed)
+	}
+	if len(m.Reason) != 1 {
+		t.Fatalf("应只有成功率一条原因, got %v", m.Reason)
+	}
+	t.Log(m.Reason[0])
+}
+
+// stale=0 关闭陈旧维度后，只剩成功率一个告警来源
+func TestEvaluateStaleDisabled(t *testing.T) {
+	itm := conf.Metric{
+		Network:      "bsc",
+		Scanning:     true,
+		Total:        100,
+		RecentRate:   100,
+		SuccessRate:  100,
+		StaleSeconds: 999999,
+	}
+
+	if m := evaluate(itm, false, 90, 0); m.Alert {
+		t.Fatalf("stale=0 且成功率达标时不应告警, reason=%v", m.Reason)
+	}
+
+	// 未关闭时应告警，证明用例本身有效
+	if m := evaluate(itm, false, 90, 300); !m.Alert {
+		t.Fatal("stale=300 时长期未同步应告警（对照组）")
+	}
+}
+
+// 样本为空时成功率恒为 100，不参与判断，避免刚启动就误报
+func TestEvaluateNoSamples(t *testing.T) {
+	itm := conf.Metric{Network: "bsc", Scanning: true, Total: 0, RecentRate: 100, StaleSeconds: 5}
+	if m := evaluate(itm, false, 90, 300); m.Alert {
+		t.Fatalf("无样本时不应告警, reason=%v", m.Reason)
+	}
+}
+
+// window=total 时应改用全窗口成功率参与比较
+func TestEvaluateUsesTotalWindow(t *testing.T) {
+	itm := conf.Metric{
+		Network:     "bsc",
+		Scanning:    true,
+		Total:       1000,
+		RecentRate:  20, // 近期很差
+		SuccessRate: 95, // 长期尚可
+	}
+
+	if m := evaluate(itm, true, 90, 0); m.Alert {
+		t.Fatalf("window=total 应看 95%%，不应告警, rate_used=%v", m.RateUsed)
+	}
+	if m := evaluate(itm, false, 90, 0); !m.Alert {
+		t.Fatal("window=recent 应看 20%，应告警")
+	}
+}
+
+// 告警文案必须是干净的单个百分号，不能出现重复数字
+func TestEvaluateReasonFormat(t *testing.T) {
+	itm := conf.Metric{Network: "bsc", Scanning: true, Total: 100, RecentRate: 50}
+	m := evaluate(itm, false, 90, 0)
+
+	const want = "成功率 50.00% 低于阈值 90.00%"
+	if len(m.Reason) != 1 || m.Reason[0] != want {
+		t.Fatalf("告警文案 = %q, 期望 %q", m.Reason, want)
+	}
 }

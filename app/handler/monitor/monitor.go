@@ -46,7 +46,7 @@ type metric struct {
 // 可选参数：
 //
 //	threshold  成功率告警阈值，默认 50
-//	stale      同步陈旧告警阈值（秒），默认 300，传 0 关闭该维度
+//	stale      同步陈旧告警阈值（秒），默认 300，传 0 关闭该维度（仅在扫链中判定）
 //	window     成功率取样窗口，recent（默认，近期窗口，灵敏）或 total（全窗口 1000 样本）
 func (Monitor) Stats(ctx *gin.Context) {
 	if !authorize(ctx) {
@@ -68,24 +68,7 @@ func (Monitor) Stats(ctx *gin.Context) {
 			scanning++
 		}
 
-		var rate = itm.RecentRate
-		if useTotal {
-			rate = itm.SuccessRate
-		}
-
-		var m = metric{Metric: itm, RateUsed: rate, Reason: make([]string, 0)}
-
-		// 样本为空时成功率恒为 100，不具备判断意义，跳过以免掩盖问题或误报
-		if itm.Total > 0 && rate < rateThreshold {
-			m.Alert = true
-			m.Reason = append(m.Reason, fmt.Sprintf("成功率 %.2f%% 低于阈值 %.2f%%", rate, rateThreshold))
-		}
-
-		// 扫块为需求驱动，空闲停扫时陈旧属正常，仅在应活跃时判断该维度
-		if staleThreshold > 0 && itm.Scanning && itm.StaleSeconds > staleThreshold {
-			m.Alert = true
-			m.Reason = append(m.Reason, fmt.Sprintf("已 %d 秒未成功同步，超过阈值 %d 秒", itm.StaleSeconds, staleThreshold))
-		}
+		var m = evaluate(itm, useTotal, rateThreshold, staleThreshold)
 
 		if m.Alert {
 			alerts = append(alerts, fmt.Sprintf("%s: %s", itm.Network, strings.Join(m.Reason, "；")))
@@ -113,7 +96,7 @@ func (Monitor) Stats(ctx *gin.Context) {
 		"stale_threshold":  staleThreshold,
 		"window":           map[bool]string{true: "total", false: "recent"}[useTotal],
 		"recent_samples":   p.Samples,
-		"scan_demand_note": "扫块为需求驱动，无待处理订单且未启用钱包监控时会停扫，此时 scanning 为 false，陈旧维度不参与告警",
+		"scan_demand_note": "扫块为需求驱动，无待处理订单且未启用钱包监控时会停扫，此时 scanning 为 false，该网络完全不参与告警判定",
 	}
 
 	// 参数写错时显式回报，避免使用方以为阈值已生效
@@ -129,6 +112,37 @@ func (Monitor) Stats(ctx *gin.Context) {
 		"summary":  summary,
 		"networks": items,
 	})
+}
+
+// evaluate 判定单条网络是否需要告警。
+//
+// 前提：扫块为需求驱动，网关无待处理订单且未启用钱包监控时扫块器会主动停扫，
+// 统计值随之冻结在停扫前的状态。此时无论成功率还是同步时间都不反映节点健康度，
+// 告警既不可行动也无从恢复，故整条网络直接跳过判定——只在真正扫链时才判断。
+func evaluate(itm conf.Metric, useTotal bool, rateThreshold float64, staleThreshold int64) metric {
+	var rate = itm.RecentRate
+	if useTotal {
+		rate = itm.SuccessRate
+	}
+
+	var m = metric{Metric: itm, RateUsed: rate, Reason: make([]string, 0)}
+	if !itm.Scanning {
+
+		return m
+	}
+
+	// 样本为空时成功率恒为 100，不具备判断意义，跳过以免掩盖问题或误报
+	if itm.Total > 0 && rate < rateThreshold {
+		m.Alert = true
+		m.Reason = append(m.Reason, fmt.Sprintf("成功率 %.2f%% 低于阈值 %.2f%%", rate, rateThreshold))
+	}
+
+	if staleThreshold > 0 && itm.StaleSeconds > staleThreshold {
+		m.Alert = true
+		m.Reason = append(m.Reason, fmt.Sprintf("已 %d 秒未成功同步，超过阈值 %d 秒", itm.StaleSeconds, staleThreshold))
+	}
+
+	return m
 }
 
 type params struct {

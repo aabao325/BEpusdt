@@ -11,11 +11,11 @@
 阈值 90、每 5 分钟轮询一次，用这个：
 
 ```
-https://你的域名/api/monitor/stats?token=你的新令牌&threshold=90&samples=100
+https://你的域名/api/monitor/stats?token=你的新令牌&threshold=90&samples=100&stale=0
 ```
 
-**不要加 `window=total`**，也不要加 `stale=0`。为什么是 `samples=100` 而不是默认值，
-下面「窗口要匹配轮询间隔」一节有完整推导。
+**不要加 `window=total`**。为什么是 `samples=100` 而不是默认值，下面
+「窗口要匹配轮询间隔」一节有完整推导；`stale=0` 的取舍见「只想要成功率告警」。
 
 changedetection 里触发条件盯这个字符串：
 
@@ -261,7 +261,7 @@ https://你的域名/api/monitor/stats?token=你的令牌
 
 1. 新建一个监控，URL 填：
    ```
-   https://你的域名/api/monitor/stats?token=你的令牌&threshold=90&samples=100
+   https://你的域名/api/monitor/stats?token=你的令牌&threshold=90&samples=100&stale=0
    ```
 2. **方法选 GET**，**检查间隔设 5 分钟**（`samples=100` 就是按这个间隔配的）。
 3. 触发条件选「文本包含 / 关键字触发」，把下面的字符串设为变化基准：
@@ -279,7 +279,7 @@ https://你的域名/api/monitor/stats?token=你的令牌
 告警触发时 `alerts` 数组里会带原因，比如：
 
 ```json
-"alerts": ["bsc: 成功率 0.00% 低于阈值 50.00%"]
+"alerts": ["bsc: 成功率 45.00% 低于阈值 90.00%"]
 ```
 
 ---
@@ -293,12 +293,15 @@ https://你的域名/api/monitor/stats?token=你的令牌
 | `status` | `OK` 正常 / `DEGRADED` 有网络告警 / `NO_DATA` 没有任何扫块样本 |
 | `alert` | `true` = 至少有一条告警，`false` = 没有 |
 
-每条网络的告警来源有两个维度，任一命中就告：
+**大前提：只有正在扫链（`scanning: true`）的网络才参与告警判定。**
+空闲停扫的网络无论数字多难看都不会告警，原因见下面「什么是 scanning」。
+
+在此前提下，告警来源有两个维度，任一命中就告：
 
 1. **成功率低**：`recent_rate`（最近 `samples` 次扫块的成功率，默认 20 次）低于
    `threshold`。这是主告警源。
 2. **同步陈旧**：`stale_seconds`（距上次成功同步的秒数）超过阈值，默认 300 秒。
-   这个维度**只在 `scanning: true` 时才参与**，下面会解释。
+   加 `stale=0` 可以关掉它，只留成功率。
 
 ### 阈值是「平均值跌破线」，不是瞬时值
 
@@ -313,15 +316,16 @@ https://你的域名/api/monitor/stats?token=你的令牌
 判断是严格小于（`<`）。阈值 90 时，成功率正好 90.00% **不触发**。要包含等于，
 写 `threshold=90.01`。
 
-### 什么是 `scanning`，为什么空闲时不会误报陈旧
+### 什么是 `scanning`，为什么空闲的链不会告警
 
 扫块是**需求驱动**的：没有待处理的订单、也没有启用「其它通知」的钱包时，扫块器
-会主动停。这时数据不刷新是正常的，拿陈旧度告警会天天误报。
+会主动停。停扫期间统计值冻结在停扫前的状态——成功率不再变化，`stale_seconds`
+一直累加。这些数字不反映节点健康度，据此告警既没法处理也没法恢复。
 
-所以每条网络有 `scanning` 字段，告诉你当前**应该**在扫吗：
+所以每条网络有 `scanning` 字段，告诉你当前**是否应该在扫**：
 
-- `true`：有活要干，陈旧维度参与告警；
-- `false`：空闲停扫，陈旧维度不参与，不会因为「好久没同步」而报警。
+- `true`：有活要干，成功率和陈旧两个维度都参与告警；
+- `false`：空闲停扫，**整条网络跳过判定**，不产生任何告警。
 
 如果你的网关平时没启用 `other_notify` 的钱包，空闲时段接口可能返回
 `networks: []` + `NO_DATA`。这个状态**刻意不置 `alert`**（对空闲网关是常态），
@@ -339,10 +343,10 @@ https://你的域名/api/monitor/stats?token=你的令牌
 | `stale` | `300` | ≥ 0 | 陈旧秒数阈值，超过触发；`0` 关闭该维度 |
 | `window` | `recent` | `recent` / `total` | `recent` 用 `samples` 个样本，`total` 用全部 1000 个 |
 
-**5 分钟轮询的推荐配置**：
+**5 分钟轮询的推荐配置**（只要成功率告警）：
 
 ```
-https://你的域名/api/monitor/stats?token=令牌&threshold=90&samples=100
+https://你的域名/api/monitor/stats?token=令牌&threshold=90&samples=100&stale=0
 ```
 
 参数之间用单个 `&` 分隔。**不要写成 `&amp;`**，否则参数不生效（见下面排查一节）。
@@ -374,12 +378,16 @@ https://你的域名/api/monitor/stats?token=令牌&threshold=90&samples=100
 
 它的用途是看「这个节点长期健康度如何」，不适合做故障告警。
 
-### 为什么不要关掉 `stale`
+### 只想要成功率告警：加 `stale=0`
 
-保持默认的 `stale=300` 有用：它能兜住一种成功率抓不到的情况——扫块器卡死但没有
-产生失败记录（比如某次 RPC 调用挂住）。这时成功率不变，但 `stale_seconds` 会一直涨。
+`stale`（同步陈旧）是第二个告警维度，能兜住一种成功率抓不到的情况：扫块器卡死
+但没产生失败记录，成功率不变而 `stale_seconds` 一直涨。
 
-这个维度只在 `scanning: true` 时参与判断，网关空闲时不会误报，留着没有副作用。
+但它有个代价：容器重启后若某条链长时间空闲，`stale_seconds` 会累积成很大的数字，
+一旦该链恢复扫链，第一次判定就会带出一条「已 XXXXX 秒未成功同步」。这条信息对
+「节点是否健康」没有指导意义。
+
+**只关心成功率就加 `stale=0`**，告警原因里就只剩成功率一条。
 
 ---
 
