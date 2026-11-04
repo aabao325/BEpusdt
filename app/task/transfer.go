@@ -85,6 +85,7 @@ func orderTransferHandle(ctx context.Context) {
 			}
 
 			var other = make([]transfer, 0)
+			var pending = make([]transfer, 0)
 			var orders = getReceivableOrders()
 
 			for _, t := range batch {
@@ -98,7 +99,7 @@ func orderTransferHandle(ctx context.Context) {
 				key := fmt.Sprintf("%s%s", t.RecvAddress, t.TradeType)
 				orderList, ok := orders[key]
 				if !ok {
-					other = append(other, t)
+					pending = append(pending, t)
 					continue
 				}
 
@@ -121,12 +122,25 @@ func orderTransferHandle(ctx context.Context) {
 				}
 
 				if !matched {
-					other = append(other, t)
+					pending = append(pending, t)
 				}
 			}
 
-			if len(other) > 0 {
-				notOrderQueue.In <- other
+			// 容差阶段：等本批次全部精确匹配落定后再跑容差，
+			// 否则先到的少付款可能抢走本批次里另一笔确切付款对应的订单
+			if model.MatchMode(model.GetC(model.PaymentMatchMode)) == model.Tolerance && len(pending) > 0 {
+				var rest = make([]transfer, 0, len(pending))
+				for _, t := range pending {
+					if !toleranceMatch(orders, t) {
+						rest = append(rest, t)
+					}
+				}
+
+				pending = rest
+			}
+
+			if len(pending) > 0 {
+				other = append(other, pending...)
 			}
 
 			batch = batch[:0]
@@ -139,10 +153,19 @@ func orderTransferHandle(ctx context.Context) {
 }
 
 func orderTransferMatch(o model.Order, t transfer) bool {
-	if o.TradeType != t.TradeType || orderMatchAddress(o) != t.RecvAddress {
+	if !orderBaseMatch(o, t) {
 		return false
 	}
 	if !o.AddressLocked && !amountMatch(t.Amount, o.Amount, string(o.TradeType)) {
+		return false
+	}
+
+	return true
+}
+
+// orderBaseMatch 只校验与金额无关的匹配条件：交易类型、收款地址、时间窗口
+func orderBaseMatch(o model.Order, t transfer) bool {
+	if o.TradeType != t.TradeType || orderMatchAddress(o) != t.RecvAddress {
 		return false
 	}
 	if !o.CreatedAt.Before(t.Timestamp) || !o.ExpiredAt.After(t.Timestamp) {
@@ -150,6 +173,79 @@ func orderTransferMatch(o model.Order, t transfer) bool {
 	}
 
 	return true
+}
+
+// toleranceMatch 容差阶段的兜底匹配：只处理少付场景，且候选订单必须唯一。
+// 地址锁定订单已在精确阶段匹配完毕，此处忽略；多付费不在此模式处理范围内。
+func toleranceMatch(orders map[string][]model.Order, t transfer) bool {
+	tolerance := model.GetMatchTolerance()
+	if !tolerance.GreaterThan(decimal.Zero) {
+		return false
+	}
+
+	key := fmt.Sprintf("%s%s", t.RecvAddress, t.TradeType)
+	orderList, ok := orders[key]
+	if !ok {
+		return false
+	}
+
+	candidate, gap, count := pickToleranceCandidate(orderList, t, tolerance)
+	switch {
+	case count > 1:
+		// 多个候选说明该笔付款可能属于多笔订单，不能赌，交由人工核对补单
+		log.Task.Warn(fmt.Sprintf("容差匹配存在多个候选订单，跳过人工处理：%s %s %s",
+			t.TxHash, t.RecvAddress, t.Amount.String()))
+
+		return false
+	case candidate < 0:
+		return false
+	}
+
+	o := orderList[candidate]
+	if err := o.MarkConfirming(t.BlockNum, t.FromAddress, t.TxHash, t.Timestamp, t.Amount); err != nil {
+		log.Task.Warn("mark order confirming failed:", err)
+
+		return false
+	}
+
+	orders[key] = append(orderList[:candidate], orderList[candidate+1:]...)
+	log.Task.Info(fmt.Sprintf("容差匹配成功：订单 %s 应到 %s 实到 %s，少付 %s",
+		o.TradeId, o.Amount, t.Amount.String(), gap.String()))
+
+	return true
+}
+
+// pickToleranceCandidate 在候选订单中挑出容差匹配对象。
+// 返回命中的下标、少付额度、以及容差区间内的候选总数；调用方必须校验 count == 1 才能下单。
+func pickToleranceCandidate(orderList []model.Order, t transfer, tolerance decimal.Decimal) (int, decimal.Decimal, int) {
+	var index = -1
+	var gap decimal.Decimal
+	var count int
+
+	for i, o := range orderList {
+		if o.AddressLocked || !orderBaseMatch(o, t) {
+			continue
+		}
+
+		target, err := decimal.NewFromString(o.Amount)
+		if err != nil {
+			continue
+		}
+
+		// 少付额度 = 订单金额 - 实付金额，允许区间 (0, tolerance]
+		diff := target.Sub(t.Amount)
+		if diff.IsNegative() || diff.IsZero() || diff.GreaterThan(tolerance) {
+			continue
+		}
+
+		count++
+		if index < 0 {
+			index = i
+			gap = diff
+		}
+	}
+
+	return index, gap, count
 }
 
 func orderMatchAddress(o model.Order) string {
@@ -424,6 +520,17 @@ func amountMatch(amount decimal.Decimal, target, tradeType string) bool {
 		t = t.Round(precision)
 
 		return a.Equal(t)
+	case model.Tolerance:
+		// 容差模式的第一阶段仍是精确匹配，使用数值相等而非字符串相等，
+		// 这样 10.1 与 10.10 视为一致；少付的兜底匹配在 toleranceMatch 中进行。
+		t, err := decimal.NewFromString(target)
+		if err != nil {
+			log.Warn(err.Error())
+
+			return false
+		}
+
+		return amount.Equal(t)
 	}
 
 	return false

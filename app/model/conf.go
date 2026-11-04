@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/shopspring/decimal"
 	"github.com/spf13/cast"
 	"github.com/v03413/bepusdt/app/utils"
 	"github.com/v03413/go-cache"
@@ -45,6 +46,7 @@ var defaultConf = map[ConfKey]string{
 	PaymentTimeout:          "1200",     // 20分钟
 	PaymentCheckout:         "official", // 官方模板
 	PaymentMatchMode:        string(Classic),
+	PaymentMatchTolerance:   "0.01",
 	PaymentSupportUrl:       "",
 	PaymentLookbackHour:     "3",
 	PaymentNetworkSort:      "",
@@ -304,4 +306,20 @@ func GetLookbackHour() time.Duration {
 	var num = cast.ToInt(GetC(PaymentLookbackHour))
 
 	return time.Duration(num) * hour
+}
+
+// GetMatchTolerance 容差匹配允许的最大少付额度，配置缺失或非法时回退默认值；
+// 返回 0 或负数等价于关闭容差，不会放宽任何订单。
+func GetMatchTolerance() decimal.Decimal {
+	var raw = strings.TrimSpace(GetC(PaymentMatchTolerance))
+	if raw == "" {
+		raw = defaultConf[PaymentMatchTolerance]
+	}
+
+	tolerance, err := decimal.NewFromString(raw)
+	if err != nil || tolerance.IsNegative() {
+		return decimal.Zero
+	}
+
+	return tolerance
 }

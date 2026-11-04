@@ -77,7 +77,17 @@
               <a-option value="classic">传统模式</a-option>
               <a-option value="has_prefix">前缀匹配</a-option>
               <a-option value="round_off">修约匹配</a-option>
+              <a-option value="tolerance">容差匹配</a-option>
             </a-select>
+          </a-form-item>
+
+          <a-form-item
+            v-if="form.payment_match_mode === 'tolerance'"
+            field="payment_match_tolerance"
+            label="少付容差额度"
+            extra="容差匹配模式下允许客户最多少付的加密货币数量，仅少付生效且候选订单必须唯一；推荐 0.01"
+          >
+            <a-input v-model="form.payment_match_tolerance" placeholder="推荐 0.01" />
           </a-form-item>
 
           <a-form-item
@@ -117,6 +127,7 @@ const form = ref({
   payment_max_amount: "",
   payment_min_amount: "",
   payment_match_mode: "classic",
+  payment_match_tolerance: "0.01",
   home_redirect_url: "",
   payment_lookback_hour: ""
 });
@@ -175,6 +186,23 @@ const rules = {
       message: "金额匹配模式不能为空"
     }
   ],
+  payment_match_tolerance: [
+    {
+      validator: (value: string, callback: (error?: string) => void) => {
+        const num = Number(value);
+        if (form.value.payment_match_mode !== "tolerance") {
+          callback();
+
+          return;
+        }
+        if (value === "" || Number.isNaN(num) || num < 0) {
+          callback("少付容差额度必须为不小于 0 的数字");
+        } else {
+          callback();
+        }
+      }
+    }
+  ],
   payment_lookback_hour: [
     {
       required: true,
@@ -204,6 +232,7 @@ const onSubmit = async ({ errors }: ArcoDesign.ArcoSubmit) => {
     { key: "payment_min_amount", value: form.value.payment_min_amount },
     { key: "payment_timeout", value: form.value.payment_timeout },
     { key: "payment_match_mode", value: form.value.payment_match_mode },
+    { key: "payment_match_tolerance", value: form.value.payment_match_tolerance },
     { key: "home_redirect_url", value: form.value.home_redirect_url },
     { key: "payment_lookback_hour", value: form.value.payment_lookback_hour }
   ]);
@@ -223,6 +252,7 @@ watch(
     form.value.payment_min_amount = data.value.payment_min_amount;
     form.value.payment_timeout = data.value.payment_timeout;
     form.value.payment_match_mode = data.value.payment_match_mode || "classic";
+    form.value.payment_match_tolerance = data.value.payment_match_tolerance || "0.01";
     form.value.home_redirect_url = data.value.home_redirect_url || "";
     form.value.payment_lookback_hour = data.value.payment_lookback_hour || "";
   }

@@ -91,6 +91,7 @@ const getConf = async () => {
     let data = await getsConfAPI({
       keys: [
         "payment_match_mode",
+        "payment_match_tolerance",
         "api_app_uri",
         "api_auth_token",
         "admin_username",

@@ -45,16 +45,17 @@ const (
 	AtomETH  ConfKey = "atom_eth"
 	AtomGRAM ConfKey = "atom_gram"
 
-	MonitorAuthToken    ConfKey = "monitor_auth_token" // 节点状态监控令牌，持久化不随会话失效
-	MonitorMinAmount    ConfKey = "monitor_min_amount" // 监控最小金额，低于此金额的入账不进行通知
-	PaymentMinAmount    ConfKey = "payment_min_amount"
-	PaymentMaxAmount    ConfKey = "payment_max_amount"
-	PaymentTimeout      ConfKey = "payment_timeout"       // 订单支付超时时间，单位秒
-	PaymentCheckout     ConfKey = "payment_checkout"      // 收银台模板
-	PaymentMatchMode    ConfKey = "payment_match_mode"    // 订单金额匹配模式
-	PaymentSupportUrl   ConfKey = "payment_support_url"   // 订单支付客服链接
-	PaymentLookbackHour ConfKey = "payment_lookback_hour" // 订单回溯时间
-	PaymentNetworkSort  ConfKey = "payment_network_sort"  // 收银台网络顺序，逗号分隔
+	MonitorAuthToken      ConfKey = "monitor_auth_token" // 节点状态监控令牌，持久化不随会话失效
+	MonitorMinAmount      ConfKey = "monitor_min_amount" // 监控最小金额，低于此金额的入账不进行通知
+	PaymentMinAmount      ConfKey = "payment_min_amount"
+	PaymentMaxAmount      ConfKey = "payment_max_amount"
+	PaymentTimeout        ConfKey = "payment_timeout"         // 订单支付超时时间，单位秒
+	PaymentCheckout       ConfKey = "payment_checkout"        // 收银台模板
+	PaymentMatchMode      ConfKey = "payment_match_mode"      // 订单金额匹配模式
+	PaymentMatchTolerance ConfKey = "payment_match_tolerance" // 容差匹配允许的最大少付额度
+	PaymentSupportUrl     ConfKey = "payment_support_url"     // 订单支付客服链接
+	PaymentLookbackHour   ConfKey = "payment_lookback_hour"   // 订单回溯时间
+	PaymentNetworkSort    ConfKey = "payment_network_sort"    // 收银台网络顺序，逗号分隔
 
 	RpcEndpointPlasma         ConfKey = "rpc_endpoint_plasma"            // Plasma RPC节点
 	RpcEndpointBsc            ConfKey = "rpc_endpoint_bsc"               // BSC RPC节点
@@ -111,6 +112,7 @@ const (
 	Classic   MatchMode = "classic"    // 经典模式，精确匹配
 	HasPrefix MatchMode = "has_prefix" // 前缀匹配，允许多付
 	RoundOff  MatchMode = "round_off"  // 数值修约，四舍五入，允许容错
+	Tolerance MatchMode = "tolerance"  // 容差匹配，允许固定额度的少付，候选订单必须唯一
 )
 
 // USD 交易类型常见扫描范围
